@@ -1,0 +1,339 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+set.seed(1234)
+pacman::p_load(dplyr, ggplot2, purrr, rlang, stringr,rpart,rpart.plot,e1071, randomForest, random, caret)
+```
+
+Load data
+```{r}
+test <- read.csv("input/test.csv")
+train <- read.csv("input/train.csv")
+gender <- read.csv("input/gender_submission.csv")
+```
+
+
+What data is there, and what type is it
+```{r}
+#colnames(train)
+#purrr::map_chr(train, ~ class(.x))
+#purrr::map(train, ~ summary(.x))
+```
+Useful functions
+Redo variables which are really factors
+```{r}
+
+age_add <- function(data) {
+  repeat {
+    x <- ceiling(rnorm(1,mean = mean(data$Age, na.rm = T), sd = sd(data$Age, na.rm = T)))
+    if (x <= max(data$Age, na.rm = T) & x > 0) {
+      return(x)
+    }
+  }
+}
+
+munge_data <- function(data) {
+  data %>% 
+    mutate(pass_name = as.character(Name)) %>% 
+    mutate(Embarked = as.character(Embarked)) %>% 
+    dplyr::rowwise() %>% 
+    #mutate(age = case_when(is.na(Age) ~ age_add(), TRUE ~ Age)) %>% 
+    mutate(age = case_when(is.na(Age) ~ mean(data$Age, na.rm = T), TRUE ~ Age)) %>% 
+    mutate(fam_name = unlist(strsplit(pass_name,","))[1]) %>% 
+    mutate(depart = case_when(Embarked == "" ~ as.character(sample(c("C","Q","S"),1)),
+      TRUE ~ Embarked)) %>% 
+    ungroup() %>% 
+    mutate(age_grp = cut(age,breaks = c(0,18,25,35,45,55,65,100), 
+      labels = c("0-18","19-24","25-34","35-44","45-54","55-64","65+"))) %>% 
+    #mutate(survive = case_when(Survived == 1 ~ "Yes", TRUE ~ "No")) %>% 
+    mutate(pass_class = factor(Pclass, levels = c(1,2,3))) %>% 
+    mutate(sib_n = factor(SibSp), par_n = factor(Parch)) %>% 
+    mutate(title = gsub("^.*, (.*?)\\..*$", "\\1", pass_name)) %>% 
+    mutate(title_type = case_when(
+      title %in% c("Capt","Col","Major","Dr","Rev") ~ "Professional",
+      title %in% c("Miss","Mlle","Ms") ~ "Ms",
+      title %in% c("Don","Jonkheer","Lady","Sir","the Countess") ~ "Noble",
+      title %in% c("Mme","Mrs") ~ "Mrs",
+      title %in% c("Mr") ~ "Mr",
+      title %in% c("Master") ~ "Boy",
+      TRUE ~ "Other"
+    )) %>% 
+    mutate(title_type = factor(title_type, 
+      levels = c("Boy","Mr","Mrs","Ms","Noble","Other","Professional"))) %>% 
+    mutate(par_grp = case_when(Parch == 0 ~ "0", Parch == 1 ~ "1", Parch == 2 ~ "2",
+      TRUE ~ ">2")) %>% 
+    mutate(sib_grp = case_when(SibSp == 0 ~ "0", SibSp == 1 ~ "1", SibSp == 2 ~ "2",
+      TRUE ~ ">2")) %>% 
+    mutate(family = case_when(par_grp == "0" & sib_grp == "0" ~ 0, TRUE ~ 1)) %>% 
+    mutate(age18 = case_when(Age < 18 ~ "1", TRUE ~ "0")) %>% 
+    mutate_at(vars(par_grp,sib_grp,family,age18,depart),
+      ~ factor(.x))
+}
+
+train <- munge_data(train) %>% 
+  mutate(survive = case_when(Survived == 1 ~ "Yes", TRUE ~ "No")) %>% 
+  mutate(survive = factor(survive))
+```
+
+
+Describe the numerics
+```{r}
+
+ggplot(train, aes(x = age)) + geom_density()
+ggplot(train, aes(x = age)) + geom_histogram(bins = 50)
+```
+
+
+```{r}
+ggplot(train, aes(x = age_grp, fill = survive)) + geom_histogram(stat = "count")
+
+plot_factor <- function(data, x) {
+  if (length(x) > 1) {
+    data <- data %>% group_by(!!!syms(x), survive) %>% count() %>% 
+      group_by(!!!syms(x)) %>% 
+      mutate(total_n = sum(n)) %>% mutate(pct = n/total_n)
+    x1 <- x[[1]]
+    x2 <- x[[2]]
+    x <- x1
+  } else {
+    data <- data %>% group_by(!!sym(x), survive) %>% count() %>% 
+      group_by(!!sym(x)) %>% 
+      mutate(total_n = sum(n)) %>% mutate(pct = n/total_n)
+    x2 <- NULL
+  }
+  out <- ggplot(data, aes(x = !!sym(x), fill = survive, y = pct)) + 
+    geom_bar(position = "fill",stat = "identity") + 
+    geom_hline(yintercept = 0.5, linetype = "dashed") +
+    scale_x_discrete(expand = c(0,0)) +
+    scale_y_continuous(expand = c(0,0))
+  
+  if (!is.null(x2)) {
+    out <- out + facet_grid(reformulate(x2))
+  }
+  
+  out
+  
+}
+plot_factor(train,"age_grp")
+plot_factor(train,"pass_class")
+plot_factor(train,"Sex")
+plot_factor(train,list("pass_class","Sex"))
+plot_factor(train,list("age_grp","Sex"))
+
+ggplot(train, aes(x = age_grp, fill = survive)) + geom_histogram(stat = "count") +
+  facet_wrap(~Sex)
+
+ggplot(train, aes(x = pass_class, fill = survive)) + geom_histogram(stat = "count") +
+  facet_wrap(~Sex)
+
+```
+Extract title
+```{r eval=FALSE, include=FALSE}
+train <- train %>% mutate(title = gsub("^.*, (.*?)\\..*$", "\\1", pass_name))
+table(train$title)
+train <- train %>% mutate(title_type = case_when(
+  title %in% c("Capt","Col","Major","Dr","Rev") ~ "Professional",
+  title %in% c("Miss","Mlle","Ms") ~ "Ms",
+  title %in% c("Don","Jonkheer","Lady","Sir","the Countess") ~ "Noble",
+  title %in% c("Mme","Mrs") ~ "Mrs",
+  title %in% c("Mr") ~ "Mr",
+  title %in% c("Master") ~ "Boy",
+  TRUE ~ "Other"
+)) %>% 
+  mutate(par_grp = case_when(Parch == 0 ~ "0", Parch == 1 ~ "1", Parch == 2 ~ "2",
+    TRUE ~ ">2")) %>% 
+  mutate(sib_grp = case_when(SibSp == 0 ~ "0", SibSp == 1 ~ "1", SibSp == 2 ~ "2",
+    TRUE ~ ">2")) %>% 
+  mutate(family = case_when(par_grp == "0" & sib_grp == "0" ~ 0, TRUE ~ 1)) %>% 
+  mutate(age18 = case_when(Age < 18 ~ "1", TRUE ~ "0")) %>% 
+  mutate_at(vars(survive,par_grp,sib_grp,family,title_type,age18,depart),
+    ~ factor(.x))
+```
+Uh
+```{r}
+
+selected_train <- train %>% select(survive, Sex, pass_class,  
+  sib_grp, title_type, depart, age18, age, age_grp, family, par_grp)
+response <- train$survive
+
+
+
+###For Cross validation purpose will keep 20% of data aside from my orginal train set
+##This is just to check how well my data works for unseen data
+set.seed(1234)
+split_sets <- function(data) {
+  ind <- createDataPartition(data$survive, times = 1, p = 0.8, list = FALSE)
+  train_val <- data[ind,]
+  test_val <- data[-ind,]
+  # Change the sampling so that there are equal numbers of events
+  
+  train_down <- downSample(x = train_val[, !colnames(train_val) %in% "survive"],
+                         y = train_val$survive) %>% 
+    rename(survive = Class)
+  train_up <- upSample(x = train_val[, !colnames(train_val) %in% "survive"],
+                         y = train_val$survive) %>% 
+    rename(survive = Class)
+  list(train = list(down = train_down, up = train_up, none = train_val), 
+    test = test_val)
+}
+
+model_acc <- function(data, model) {
+  
+  pred <- predict(model, data = data, type = "class")
+  confusionMatrix(pred, factor(data$survive))$overall[1]
+}
+
+train_val <- split_sets(selected_train)$train$up
+test_val <- split_sets(selected_train)$test
+
+```
+
+```{r}
+set.seed(1234)
+Model_DT <- rpart(survive ~ ., data = train_val, method = "class")
+
+
+rpart.plot(Model_DT,extra =  3,fallen.leaves = T)
+#PRE_TDT <- predict(Model_DT, data = train_val, type = "class")
+#confusionMatrix(PRE_TDT, factor(train_val$survive))$overall[1]
+```
+
+```{r}
+model_acc(train_val, rpart(survive ~ ., data = train_val, method = "class"))
+
+```
+
+```{r}
+train1 <- train %>% select(survive, title_type, sib_grp, pass_class, age, depart, Sex)
+train_val1 <- split_sets(train1)$train$none
+train_val1_up <- split_sets(train1)$train$up
+train_val1_down <- split_sets(train1)$train$down
+test_val1 <- split_sets(train1)$test
+
+model_acc(train_val1, rpart(survive ~ ., data = train_val1, method = "class"))
+model_acc(train_val1_up, rpart(survive ~ ., data = train_val1_up, method = "class"))
+model_acc(train_val1_down, rpart(survive ~ ., data = train_val1_down, method = "class"))
+
+#glmnet(train_val1 %>% select(-survive) %>% as.matrix(), train_val1$survive, family = "binomial")
+#glm(survive ~ ., data = train_val1, family = binomial )
+list_glm <- predict(glm(survive ~ ., data = train_val1, family = "binomial"),
+  train_val1 %>% select(-survive), type = "response")
+list_glm2 <- ifelse(list_glm > 0.5,"Yes","No") %>% as.factor()
+confusionMatrix(list_glm2, factor(train_val1$survive))$overall[1]
+# train_model1 <- rpart(survive ~ ., data = train_val1, method = "class")
+# 
+# pred1 <- predict(train_model1, data = train_val1, type = "class")
+# confusionMatrix(pred1, factor(train_val1$survive))
+```
+
+```{r}
+set.seed(1234)
+
+rf_basic <- function(data, test) {
+  raw <- randomForest(
+    x = (data %>% select(-survive)), 
+    y = data$survive, importance = TRUE, ntree = 1000)
+  pred <- predict(raw, test)
+  conf <- confusionMatrix(pred,factor(test$survive))
+  list(conf = conf, model = raw)
+}
+
+
+
+rf_basic(train_val, test_val)$conf
+rf_basic(train_val1, test_val1)$conf
+rf_basic(train_val1_up, test_val1)$conf
+rf_basic(train_val1_down, test_val1)
+best_rf <- rf_basic(train_val)
+
+
+```
+
+```{r}
+varImpPlot(rf_up)
+```
+
+
+
+```{r}
+set.seed(1274)
+
+svm_pred <- function(data) {
+  model <- tune.svm(survive~.,
+    data = data,
+    kernel = "linear",
+    cost = c(0.01,0.1,0.2,0.5,0.7,1,2,3,5,10,15,20,50,100))
+  summary(model)
+}
+
+svm_pred(train_val1_up)
+svm_pred(train_val)
+svm_pred(train_val1)
+
+```
+
+```{r}
+set.seed(1274)
+svm_gamma <- function(data, test) {
+  model <- tune.svm(
+  survive~., 
+  data = data, 
+  kernel = "radial", 
+  gamma = seq(0.1,5)
+)
+  pred <- predict(model$best.model,newdata = test)
+  
+  confusionMatrix(pred,test$survive)
+}
+svm_gamma(train_val, test_val)
+svm_gamma(train_val1, test_val1)
+svm_gamma(train_val1_up, test_val1)
+```
+
+```{r}
+best.rd=svm_val1_up$best.model
+
+###Non Linear Kerenel giving us a better accuray 
+
+##Lets Predict test data
+pre.rd=predict(svm_val1_up$best.model,newdata = test_val)
+
+confusionMatrix(pre.rd,test_val$survive)
+```
+Actual test
+```{r}
+
+
+test2 <- munge_data(test)
+test3 <- test2 %>% select(title_type, sib_grp, pass_class, age, depart, Sex)
+```
+
+```{r}
+
+
+###Non Linear Kerenel giving us a better accuray
+
+##Lets Predict test data
+pre.rd <- predict(object = rf_up, newdata = test3)
+
+correct <- read.csv("titanic_correct.csv")$Survived
+ending <- data.frame(PassengerId = test2$PassengerId, Survived = pre.rd, correct) %>% 
+  mutate(correct = factor(correct, levels = c(0,1), labels = c("No","Yes")))
+
+
+confusionMatrix(ending$Survived, ending$correct)
+
+write.csv(ending, "submission.csv",row.names = F)
+
+#confusionMatrix(pre.rd,factor(test3$survive))
+```
+
